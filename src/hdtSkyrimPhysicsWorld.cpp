@@ -4,6 +4,7 @@
 #include "hdtPhysicsProfiler.h"
 
 #include <LinearMath/btQuickprof.h>
+#include <chrono>
 
 namespace hdt
 {
@@ -317,6 +318,9 @@ namespace hdt
 
 	void SkyrimPhysicsWorld::resetSystems()
 	{
+		if (disabled) {
+			return;
+		}
 		std::lock_guard<decltype(m_lock)> l(m_lock);
 		for (auto& i : m_systems)
 			i->readTransform(i->prepareForRead(RESET_PHYSICS));
@@ -325,6 +329,37 @@ namespace hdt
 	RE::BSEventNotifyControl SkyrimPhysicsWorld::ProcessEvent(const Events::FrameEvent* e, RE::BSTEventSource<Events::FrameEvent>*)
 	{
 		auto mm = RE::UI::GetSingleton();
+
+		// --- Automatic SMP Off/On Guard around Loading Screens & Fast Travel ---
+		static bool s_disabledByLoadGuard = false;
+		static bool s_waitingToReenable = false;
+		static std::chrono::steady_clock::time_point s_loadEndTime{};
+
+		const bool isLoadingNow = m_loading || (mm && (mm->IsMenuOpen(RE::LoadingMenu::MENU_NAME) || mm->IsMenuOpen(RE::MapMenu::MENU_NAME)));
+
+		if (isLoadingNow) {
+			if (!disabled && !s_disabledByLoadGuard) {
+				disabled = true;
+				s_disabledByLoadGuard = true;
+				logger::debug("LoadGuard: SMP disabled for menu/loading transition.");
+			}
+			s_waitingToReenable = false;
+		} else if (s_disabledByLoadGuard) {
+			if (!s_waitingToReenable) {
+				s_loadEndTime = std::chrono::steady_clock::now();
+				s_waitingToReenable = true;
+			} else {
+				const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+					std::chrono::steady_clock::now() - s_loadEndTime).count();
+				if (elapsedMs >= 1500) {
+					disabled = false;
+					s_disabledByLoadGuard = false;
+					s_waitingToReenable = false;
+					logger::debug("LoadGuard: SMP re-enabled after 1500ms post-load settle.");
+				}
+			}
+		}
+		// -----------------------------------------------------------------------
 
 		if ((e->gamePaused || mm->GameIsPaused()) && !m_suspended) {
 			suspend();
